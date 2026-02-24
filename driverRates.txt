@@ -1,0 +1,4 @@
+D1001,Friday,30000,2
+D1002,Saturday,25000,3
+D1003,Thursday,45000,1
+D1004,Friday,15000,4
