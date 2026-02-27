@@ -1,5 +1,28 @@
 const fs = require("fs");
 
+// global helper functions
+
+function toSeconds(timeStr) {
+    const [timePart, period] = timeStr.trim().toLowerCase().split(" ");
+    let [hours, minutes, seconds] = timePart.split(":").map(Number);
+
+    if (period == "am" && hours == 12) {
+        hours = 0;
+    }
+    if (period == "pm" && hours != 12) {
+        hours += 12;
+    }
+
+    return hours * 3600 + minutes * 60 + seconds;
+}
+
+function formatDuration(totalSeconds) {
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return hours + ":" + String(minutes).padStart(2, "0") + ":" + String(seconds).padStart(2, "0");
+}
+
 // ============================================================
 // Function 1: getShiftDuration(startTime, endTime)
 // startTime: (typeof string) formatted as hh:mm:ss am or hh:mm:ss pm
@@ -7,7 +30,16 @@ const fs = require("fs");
 // Returns: string formatted as h:mm:ss
 // ============================================================
 function getShiftDuration(startTime, endTime) {
-    // TODO: Implement this function
+    // check if endTime starts the day before startTime, if so, add 24 hours to endTime
+
+    let startSeconds = toSeconds(startTime);
+    let endSeconds = toSeconds(endTime);
+
+    if (endSeconds < startSeconds) {
+        endSeconds += 24 * 3600;
+    }
+
+    return formatDuration(endSeconds - startSeconds);
 }
 
 // ============================================================
@@ -17,7 +49,30 @@ function getShiftDuration(startTime, endTime) {
 // Returns: string formatted as h:mm:ss
 // ============================================================
 function getIdleTime(startTime, endTime) {
-    // TODO: Implement this function
+    // endTime day check
+    let startSeconds = toSeconds(startTime);
+    let endSeconds = toSeconds(endTime);
+
+    if (endSeconds < startSeconds) {
+        endSeconds += 24 * 3600;
+    }
+
+    const deliveryStart = 8 * 3600;
+    const deliveryEnd = 22 * 3600; 
+
+    let idleSeconds = 0;
+
+    // use min and max to handle cases where shift starts before deliveryStart or ends after deliveryEnd
+
+    if (startSeconds < deliveryStart) {
+        idleSeconds += Math.min(endSeconds, deliveryStart) - startSeconds;
+    }
+
+    if (endSeconds > deliveryEnd) {
+        idleSeconds += endSeconds - Math.max(startSeconds, deliveryEnd);
+    }
+
+    return formatDuration(idleSeconds);
 }
 
 // ============================================================
@@ -27,7 +82,14 @@ function getIdleTime(startTime, endTime) {
 // Returns: string formatted as h:mm:ss
 // ============================================================
 function getActiveTime(shiftDuration, idleTime) {
-    // TODO: Implement this function
+    function durationToSeconds(durationStr) { // separate function due to different input format
+        const [hours, minutes, seconds] = durationStr.trim().split(":").map(Number);
+        return hours * 3600 + minutes * 60 + seconds;
+    }
+
+    const shiftSeconds = durationToSeconds(shiftDuration);
+    const idleSeconds = durationToSeconds(idleTime);
+    return formatDuration(shiftSeconds - idleSeconds);
 }
 
 // ============================================================
