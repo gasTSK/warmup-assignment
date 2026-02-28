@@ -1,6 +1,79 @@
 const fs = require("fs");
 
-// global helper functions
+// global helper functions and variables
+
+const SHIFT_FILE_HEADER = "DriverID,DriverName,Date,StartTime,EndTime,ShiftDuration,IdleTime,ActiveTime,MetQuota,HasBonus";
+const TWELVE_HOUR_TIME_PATTERN = /^(0?[1-9]|1[0-2]):([0-5]\d):([0-5]\d)\s(am|pm)$/i;
+
+function isNonEmptyString(value) {
+    return typeof value === "string" && value.trim() !== "";
+}
+
+function parseValidDate(dateStr) {
+    if (!isNonEmptyString(dateStr)) {
+        return null;
+    }
+
+    const normalizedDate = dateStr.trim();
+    const dateMatch = normalizedDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!dateMatch) {
+        return null;
+    }
+
+    const year = Number(dateMatch[1]);
+    const month = Number(dateMatch[2]);
+    const day = Number(dateMatch[3]);
+
+    if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+        return null;
+    }
+
+    if (month < 1 || month > 12) {
+        return null;
+    }
+
+    const isLeapYear = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+    const daysInMonth = [31, isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if (day < 1 || day > daysInMonth[month - 1]) {
+        return null;
+    }
+
+    return {
+        year,
+        month,
+        day,
+        normalizedDate
+    };
+}
+
+function parseDurationToSeconds(durationStr) {
+    if (!isNonEmptyString(durationStr)) {
+        return null;
+    }
+
+    const match = durationStr.trim().match(/^(\d+):(\d{2}):(\d{2})$/);
+    if (!match) {
+        return null;
+    }
+
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    const seconds = Number(match[3]);
+
+    if (!Number.isInteger(hours) || !Number.isInteger(minutes) || !Number.isInteger(seconds)) {
+        return null;
+    }
+
+    if (hours < 0 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59) {
+        return null;
+    }
+
+    return hours * 3600 + minutes * 60 + seconds;
+}
+
+function isValid12HourTime(timeStr) {
+    return isNonEmptyString(timeStr) && TWELVE_HOUR_TIME_PATTERN.test(timeStr.trim());
+}
 
 function toSeconds(timeStr) {
     const [timePart, period] = timeStr.trim().toLowerCase().split(" ");
@@ -99,7 +172,20 @@ function getActiveTime(shiftDuration, idleTime) {
 // Returns: boolean
 // ============================================================
 function metQuota(date, activeTime) {
- //fff
+    const parsedDate = parseValidDate(date);
+    if (!parsedDate) {
+        return false;
+    }
+
+    const activeSeconds = parseDurationToSeconds(activeTime);
+    if (activeSeconds === null) {
+        return false;
+    }
+
+    const isEidPeriod = parsedDate.year === 2025 && parsedDate.month === 4 && parsedDate.day >= 10 && parsedDate.day <= 30;
+    const quotaSeconds = isEidPeriod ? 6 * 3600 : 8 * 3600 + 24 * 60;
+
+    return activeSeconds >= quotaSeconds;
 }
 
 // ============================================================
@@ -109,7 +195,114 @@ function metQuota(date, activeTime) {
 // Returns: object with 10 properties or empty object {}
 // ============================================================
 function addShiftRecord(textFile, shiftObj) {
-    // TODO: Implement this function
+
+    // return empty object if textFile is not a non-empty string or
+    // if shiftObj is not a valid object with required properties
+    if (!isNonEmptyString(textFile)) {
+        return {};
+    }
+
+    if (typeof shiftObj !== "object" || shiftObj === null || Array.isArray(shiftObj)) {
+        return {};
+    }
+
+    const requiredKeys = ["driverID", "driverName", "date", "startTime", "endTime"];
+    for (let i = 0; i < requiredKeys.length; i++) {
+        const key = requiredKeys[i];
+        if (!(key in shiftObj) || !isNonEmptyString(shiftObj[key])) {
+            return {};
+        }
+    }
+
+    const driverID = shiftObj.driverID.trim();
+    const driverName = shiftObj.driverName.trim();
+    const date = shiftObj.date.trim();
+    const startTime = shiftObj.startTime.trim();
+    const endTime = shiftObj.endTime.trim();
+
+    const parsedDate = parseValidDate(date);
+    if (!parsedDate) {
+        return {};
+    }
+
+    // 12-hour format checking via helper (matches hh:mm:ss am/pm with optional leading zero for hours)
+    if (!isValid12HourTime(startTime) || !isValid12HourTime(endTime)) {
+        return {};
+    }
+
+    let fileContent;
+    try {
+        fileContent = fs.readFileSync(textFile, { encoding: "utf8", flag: "r" });
+    } catch (error) {
+        return {};
+    }
+
+    const lines = fileContent.split(/\r?\n/).filter(line => line.trim() !== "");
+    const defaultHeader = SHIFT_FILE_HEADER;
+    const header = lines.length > 0 ? lines[0] : defaultHeader;
+    const records = lines.length > 1 ? lines.slice(1) : [];
+
+    for (let i = 0; i < records.length; i++) {
+        const columns = records[i].split(",");
+        const existingDriverID = (columns[0] || "").trim();
+        const existingDate = (columns[2] || "").trim();
+        if (existingDriverID === driverID && existingDate === date) {
+            return {};
+        }
+    }
+
+    // compute and build new record line
+    const shiftDuration = getShiftDuration(startTime, endTime);
+    const idleTime = getIdleTime(startTime, endTime);
+    const activeTime = getActiveTime(shiftDuration, idleTime);
+    const metQuotaValue = metQuota(date, activeTime);
+    const hasBonus = false;
+
+    const newRecordLine = [
+        driverID,
+        driverName,
+        date,
+        startTime,
+        endTime,
+        shiftDuration,
+        idleTime,
+        activeTime,
+        metQuotaValue,
+        hasBonus
+    ].join(",");
+
+    // search for last occurrence of driverID and insert new record after it
+    // if not found, append to end of file (after header if exists)
+    let lastDriverIndex = -1;
+    for (let i = 0; i < records.length; i++) {
+        const columns = records[i].split(",");
+        if ((columns[0] || "").trim() === driverID) {
+            lastDriverIndex = i;
+        }
+    }
+
+    if (lastDriverIndex === -1) {
+        records.push(newRecordLine);
+    } else {
+        records.splice(lastDriverIndex + 1, 0, newRecordLine);
+    }
+
+    // construct updated file content and write back to file
+    const updatedContent = [header].concat(records).join("\n");
+    fs.writeFileSync(textFile, updatedContent, { encoding: "utf8" });
+
+    return {
+        driverID,
+        driverName,
+        date,
+        startTime,
+        endTime,
+        shiftDuration,
+        idleTime,
+        activeTime,
+        metQuota: metQuotaValue,
+        hasBonus
+    };
 }
 
 // ============================================================
