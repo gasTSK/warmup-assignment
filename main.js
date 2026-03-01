@@ -4,6 +4,7 @@ const fs = require("fs");
 
 const SHIFT_FILE_HEADER = "DriverID,DriverName,Date,StartTime,EndTime,ShiftDuration,IdleTime,ActiveTime,MetQuota,HasBonus";
 const TWELVE_HOUR_TIME_PATTERN = /^(0?[1-9]|1[0-2]):([0-5]\d):([0-5]\d)\s(am|pm)$/i;
+const isEidPeriod = (year, month, day) => year === 2025 && month === 4 && day >= 10 && day <= 30;
 
 function isNonEmptyString(value) {
     return typeof value === "string" && value.trim() !== "";
@@ -93,14 +94,20 @@ function normalizeMonth(monthValue) {
     return null;
 }
 
+function getWeekdayName(year, month, day) {
+    const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const dateObj = new Date(year, month - 1, day);
+    return dayNames[dateObj.getDay()];
+}
+
 function toSeconds(timeStr) {
     const [timePart, period] = timeStr.trim().toLowerCase().split(" ");
     let [hours, minutes, seconds] = timePart.split(":").map(Number);
 
-    if (period == "am" && hours == 12) {
+    if (period === "am" && hours === 12) {
         hours = 0;
     }
-    if (period == "pm" && hours != 12) {
+    if (period === "pm" && hours !== 12) {
         hours += 12;
     }
 
@@ -200,8 +207,7 @@ function metQuota(date, activeTime) {
         return false;
     }
 
-    const isEidPeriod = parsedDate.year === 2025 && parsedDate.month === 4 && parsedDate.day >= 10 && parsedDate.day <= 30;
-    const quotaSeconds = isEidPeriod ? 6 * 3600 : 8 * 3600 + 24 * 60;
+    const quotaSeconds = isEidPeriod(parsedDate.year, parsedDate.month, parsedDate.day) ? 6 * 3600 : 8 * 3600 + 24 * 60;
 
     return activeSeconds >= quotaSeconds;
 }
@@ -509,7 +515,92 @@ function getTotalActiveHoursPerMonth(textFile, driverID, month) {
 // Returns: string formatted as hhh:mm:ss
 // ============================================================
 function getRequiredHoursPerMonth(textFile, rateFile, bonusCount, driverID, month) {
-    // TODO: Implement this function
+    if (!isNonEmptyString(textFile) || !isNonEmptyString(rateFile) || !isNonEmptyString(driverID)) {
+        return "0:00:00";
+    }
+
+    const targetMonth = normalizeMonth(month);
+    if (targetMonth === null) {
+        return "0:00:00";
+    }
+
+    if (!Number.isFinite(bonusCount) || bonusCount < 0) {
+        return "0:00:00";
+    }
+
+    const normalizedBonusCount = Math.floor(bonusCount);
+    const trimmedDriverID = driverID.trim();
+
+    let rateFileContent;
+    try {
+        rateFileContent = fs.readFileSync(rateFile, { encoding: "utf8", flag: "r" });
+    } catch (error) {
+        return "0:00:00";
+    }
+
+    const rateLines = rateFileContent.split(/\r?\n/).filter(line => line.trim() !== "");
+    let dayOff = null;
+
+    for (let i = 0; i < rateLines.length; i++) {
+        const columns = rateLines[i].split(",");
+        if (columns.length < 2) {
+            continue;
+        }
+
+        const currentDriverID = (columns[0] || "").trim();
+        if (currentDriverID === trimmedDriverID) {
+            dayOff = (columns[1] || "").trim().toLowerCase();
+            break;
+        }
+    }
+
+    if (!dayOff) {
+        return "0:00:00";
+    }
+
+    let fileContent;
+    try {
+        fileContent = fs.readFileSync(textFile, { encoding: "utf8", flag: "r" });
+    } catch (error) {
+        return "0:00:00";
+    }
+
+    const lines = fileContent.split(/\r?\n/).filter(line => line.trim() !== "");
+    const records = lines.length > 1 ? lines.slice(1) : [];
+
+    // accumulate required quota for matching records in the target month,
+    // skipping shifts that fall on the driver's day off
+    let requiredSeconds = 0;
+
+    for (let i = 0; i < records.length; i++) {
+        const columns = records[i].split(",");
+        if (columns.length < 10) {
+            continue;
+        }
+
+        const currentDriverID = (columns[0] || "").trim();
+        if (currentDriverID !== trimmedDriverID) {
+            continue;
+        }
+
+        const parsedDate = parseValidDate((columns[2] || "").trim());
+        if (!parsedDate || parsedDate.month !== targetMonth) {
+            continue;
+        }
+
+        const weekday = getWeekdayName(parsedDate.year, parsedDate.month, parsedDate.day).toLowerCase();
+        if (weekday === dayOff) {
+            continue;
+        }
+
+        requiredSeconds += isEidPeriod(parsedDate.year, parsedDate.month, parsedDate.day) ? 6 * 3600 : 8 * 3600 + 24 * 60;
+    }
+
+    // each bonus reduces required hours by 2 hours for that month
+    const bonusReductionSeconds = normalizedBonusCount * 2 * 3600;
+    requiredSeconds = Math.max(0, requiredSeconds - bonusReductionSeconds);
+
+    return formatDuration(requiredSeconds);
 }
 
 // ============================================================
@@ -521,7 +612,75 @@ function getRequiredHoursPerMonth(textFile, rateFile, bonusCount, driverID, mont
 // Returns: integer (net pay)
 // ============================================================
 function getNetPay(driverID, actualHours, requiredHours, rateFile) {
-    // TODO: Implement this function
+    if (!isNonEmptyString(driverID) || !isNonEmptyString(actualHours) || !isNonEmptyString(requiredHours) || !isNonEmptyString(rateFile)) {
+        return 0;
+    }
+
+    const actualSeconds = parseDurationToSeconds(actualHours);
+    const requiredSeconds = parseDurationToSeconds(requiredHours);
+    if (actualSeconds === null || requiredSeconds === null) {
+        return 0;
+    }
+
+    let fileContent;
+    try {
+        fileContent = fs.readFileSync(rateFile, { encoding: "utf8", flag: "r" });
+    } catch (error) {
+        return 0;
+    }
+
+    const trimmedDriverID = driverID.trim();
+    const rateLines = fileContent.split(/\r?\n/).filter(line => line.trim() !== "");
+
+    let basePay = null;
+    let tier = null;
+
+    for (let i = 0; i < rateLines.length; i++) {
+        const columns = rateLines[i].split(",");
+        if (columns.length < 4) {
+            continue;
+        }
+
+        const currentDriverID = (columns[0] || "").trim();
+        if (currentDriverID === trimmedDriverID) {
+            const parsedBasePay = Number((columns[2] || "").trim());
+            const parsedTier = Number((columns[3] || "").trim());
+
+            if (!Number.isFinite(parsedBasePay) || !Number.isInteger(parsedTier)) {
+                return 0;
+            }
+
+            basePay = Math.floor(parsedBasePay);
+            tier = parsedTier;
+            break;
+        }
+    }
+
+    if (basePay === null || tier === null) {
+        return 0;
+    }
+
+    const allowedMissingHoursByTier = {
+        1: 50,
+        2: 20,
+        3: 10,
+        4: 3
+    };
+
+    const allowedMissingHours = allowedMissingHoursByTier[tier];
+    if (!Number.isInteger(allowedMissingHours)) {
+        return 0;
+    }
+
+    const missingSeconds = Math.max(0, requiredSeconds - actualSeconds);
+    const billableMissingSeconds = Math.max(0, missingSeconds - allowedMissingHours * 3600);
+
+    // only full missing hours count for deduction
+    const billableMissingHours = Math.floor(billableMissingSeconds / 3600);
+    const deductionRatePerHour = Math.floor(basePay / 185);
+    const salaryDeduction = billableMissingHours * deductionRatePerHour;
+
+    return Math.max(0, basePay - salaryDeduction);
 }
 
 module.exports = {
