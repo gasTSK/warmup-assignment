@@ -75,6 +75,24 @@ function isValid12HourTime(timeStr) {
     return isNonEmptyString(timeStr) && TWELVE_HOUR_TIME_PATTERN.test(timeStr.trim());
 }
 
+function normalizeMonth(monthValue) {
+    if (typeof monthValue === "number") {
+        return Number.isInteger(monthValue) && monthValue >= 1 && monthValue <= 12 ? monthValue : null;
+    }
+
+    if (typeof monthValue === "string") {
+        const normalizedMonthText = monthValue.trim();
+        if (!/^\d{1,2}$/.test(normalizedMonthText)) {
+            return null;
+        }
+
+        const monthNumber = Number(normalizedMonthText);
+        return Number.isInteger(monthNumber) && monthNumber >= 1 && monthNumber <= 12 ? monthNumber : null;
+    }
+
+    return null;
+}
+
 function toSeconds(timeStr) {
     const [timePart, period] = timeStr.trim().toLowerCase().split(" ");
     let [hours, minutes, seconds] = timePart.split(":").map(Number);
@@ -314,7 +332,56 @@ function addShiftRecord(textFile, shiftObj) {
 // Returns: nothing (void)
 // ============================================================
 function setBonus(textFile, driverID, date, newValue) {
-    // TODO: Implement this function
+    if (!isNonEmptyString(textFile) || !isNonEmptyString(driverID) || typeof newValue !== "boolean") {
+        return;
+    }
+
+    const parsedDate = parseValidDate(date);
+    if (!parsedDate) {
+        return;
+    }
+
+    let fileContent;
+    try {
+        fileContent = fs.readFileSync(textFile, { encoding: "utf8", flag: "r" });
+    } catch (error) {
+        return;
+    }
+
+    const trimmedDriverID = driverID.trim();
+    const targetDate = parsedDate.normalizedDate;
+    const lines = fileContent.split(/\r?\n/);
+
+    let updated = false;
+
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i].trim() === "") {
+            continue;
+        }
+
+        const columns = lines[i].split(",");
+        if (columns.length < 10) {
+            continue;
+        }
+
+        const currentDriverID = (columns[0] || "").trim();
+        const currentDate = (columns[2] || "").trim();
+
+        if (currentDriverID === trimmedDriverID && currentDate === targetDate) {
+            columns[9] = String(newValue);
+            lines[i] = columns.join(",");
+            updated = true;
+        }
+    }
+
+    if (!updated) {
+        return;
+    }
+
+    // update file content and write back to file, preserving original line endings and trailing newlines
+    const hadTrailingNewLine = /\r?\n$/.test(fileContent);
+    const updatedContent = lines.join("\n") + (hadTrailingNewLine ? "\n" : "");
+    fs.writeFileSync(textFile, updatedContent, { encoding: "utf8" });
 }
 
 // ============================================================
@@ -325,7 +392,54 @@ function setBonus(textFile, driverID, date, newValue) {
 // Returns: number (-1 if driverID not found)
 // ============================================================
 function countBonusPerMonth(textFile, driverID, month) {
-    // TODO: Implement this function
+    if (!isNonEmptyString(textFile) || !isNonEmptyString(driverID)) {
+        return -1;
+    }
+
+    const targetMonth = normalizeMonth(month);
+    if (targetMonth === null) {
+        return -1;
+    }
+
+    let fileContent;
+    try {
+        fileContent = fs.readFileSync(textFile, { encoding: "utf8", flag: "r" });
+    } catch (error) {
+        return -1;
+    }
+
+    const trimmedDriverID = driverID.trim();
+    const lines = fileContent.split(/\r?\n/).filter(line => line.trim() !== "");
+    const records = lines.length > 1 ? lines.slice(1) : [];
+
+    let driverFound = false;
+    let bonusCount = 0;
+
+    for (let i = 0; i < records.length; i++) {
+        const columns = records[i].split(",");
+        if (columns.length < 10) {
+            continue;
+        }
+
+        const currentDriverID = (columns[0] || "").trim();
+        if (currentDriverID !== trimmedDriverID) {
+            continue;
+        }
+
+        driverFound = true;
+
+        const parsedDate = parseValidDate((columns[2] || "").trim());
+        if (!parsedDate || parsedDate.month !== targetMonth) {
+            continue;
+        }
+
+        const hasBonus = (columns[9] || "").trim().toLowerCase() === "true";
+        if (hasBonus) {
+            bonusCount++;
+        }
+    }
+
+    return driverFound ? bonusCount : -1;
 }
 
 // ============================================================
@@ -336,7 +450,53 @@ function countBonusPerMonth(textFile, driverID, month) {
 // Returns: string formatted as hhh:mm:ss
 // ============================================================
 function getTotalActiveHoursPerMonth(textFile, driverID, month) {
-    // TODO: Implement this function
+    if (!isNonEmptyString(textFile) || !isNonEmptyString(driverID)) {
+        return "0:00:00";
+    }
+
+    const targetMonth = normalizeMonth(month);
+    if (targetMonth === null) {
+        return "0:00:00";
+    }
+
+    let fileContent;
+    try {
+        fileContent = fs.readFileSync(textFile, { encoding: "utf8", flag: "r" });
+    } catch (error) {
+        return "0:00:00";
+    }
+
+    const trimmedDriverID = driverID.trim();
+    const lines = fileContent.split(/\r?\n/).filter(line => line.trim() !== "");
+    const records = lines.length > 1 ? lines.slice(1) : [];
+
+    let totalActiveSeconds = 0;
+
+    for (let i = 0; i < records.length; i++) {
+        const columns = records[i].split(",");
+        if (columns.length < 10) {
+            continue;
+        }
+
+        const currentDriverID = (columns[0] || "").trim();
+        if (currentDriverID !== trimmedDriverID) {
+            continue;
+        }
+
+        const parsedDate = parseValidDate((columns[2] || "").trim());
+        if (!parsedDate || parsedDate.month !== targetMonth) {
+            continue;
+        }
+
+        const activeSeconds = parseDurationToSeconds((columns[7] || "").trim());
+        if (activeSeconds === null) {
+            continue;
+        }
+
+        totalActiveSeconds += activeSeconds;
+    }
+
+    return formatDuration(totalActiveSeconds);
 }
 
 // ============================================================
